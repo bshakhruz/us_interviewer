@@ -1,3 +1,4 @@
 openai
 python-dotenv
 python-telegram-bot
+aiofiles
