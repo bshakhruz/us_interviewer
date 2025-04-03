@@ -21,6 +21,9 @@ from src.agents import (
     chat,
 )
 
+load_dotenv()
+
+
 def setup_logging():
     """Configure structured logging with file and console output"""
     os.makedirs("logs", exist_ok=True)
@@ -36,16 +39,15 @@ def setup_logging():
     
     return logging.getLogger(__name__)
 
+# Command registry for suggestion feature
+AVAILABLE_COMMANDS = ["start", "new", "help"]
+
 logger = setup_logging()
-load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 if not TOKEN:
     logger.critical("TELEGRAM_BOT_TOKEN not found in environment variables!")
     sys.exit(1)
-
-# Command registry for suggestion feature
-AVAILABLE_COMMANDS = ["start", "new", "help"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Initial greeting and instructions"""
