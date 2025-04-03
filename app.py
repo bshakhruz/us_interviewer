@@ -17,16 +17,14 @@ from telegram.ext import (
 
 from src.agents import (
     prepare_conversation,
+    transcribe_voice,
     chat,
 )
 
-# Configure logging
 def setup_logging():
-    """Configure logging with appropriate format and levels"""
-    # Create logs directory if it doesn't exist
+    """Configure structured logging with file and console output"""
     os.makedirs("logs", exist_ok=True)
     
-    # Set up logging to file and console
     logging.basicConfig(
         level=logging.INFO,
         format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -36,12 +34,9 @@ def setup_logging():
         ]
     )
     
-    # Create a logger for this module
-    logger = logging.getLogger(__name__)
-    return logger
+    return logging.getLogger(__name__)
 
 logger = setup_logging()
-
 load_dotenv()
 
 TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
@@ -49,10 +44,11 @@ if not TOKEN:
     logger.critical("TELEGRAM_BOT_TOKEN not found in environment variables!")
     sys.exit(1)
 
-# Define available commands for suggestion feature
+# Command registry for suggestion feature
 AVAILABLE_COMMANDS = ["start", "new", "help"]
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Initial greeting and instructions"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     logger.info(f"Start command received from User ID: {user_id}, Username: {username}")
@@ -62,11 +58,11 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Reset conversation state"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     logger.info(f"New conversation command received from User ID: {user_id}, Username: {username}")
     
-    # Clear any stored conversation state
     context.user_data.clear()
     logger.debug(f"Cleared conversation state for User ID: {user_id}")
     
@@ -76,6 +72,7 @@ async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Display available commands and usage instructions"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     logger.info(f"Help command received from User ID: {user_id}, Username: {username}")
@@ -93,7 +90,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle unknown commands and suggest possible alternatives"""
+    """Handle unknown commands with fuzzy matching for suggestions"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     command = update.message.text.split()[0][1:]  # Remove the '/' prefix
@@ -118,57 +115,118 @@ async def unknown_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text=suggestion_text
     )
 
+async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Global error handler for graceful failure recovery"""
+    logger.error("Exception while handling an update:", exc_info=context.error)
+
+    if isinstance(context.error, Exception) and "httpx.ReadError" in str(context.error):
+        logger.warning("A network read error occurred. It may be due to a bad connection.")
+
+    # Only notify user if we can determine the chat
+    if update and getattr(update, "effective_chat", None):
+        try:
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Произошла временная ошибка в сети. Пожалуйста, попробуйте позже."
+            )
+        except Exception:
+            pass  # Silent failure if we can't even send an error message
+
+async def combined_audio_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Router for audio inputs: either initial interview or voice query"""
+    if context.user_data.get("chatting"):
+        # Process as a voice query
+        await handle_voice_query(update, context)
+    else:
+        # Process as interview audio and set up conversation context
+        await handle_audio(update, context)
+
+async def handle_unsupported_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle unsupported media types with friendly warning"""
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "Unknown"
+    logger.info(
+        f"Unsupported file type received from User ID: {user_id}, Username: {username}"
+    )
+    warning_msg = await context.bot.send_message(
+        chat_id=update.effective_chat.id,
+        text="Неподдерживаемый тип файла. Пожалуйста, отправьте аудиофайл с интервью или текстовое сообщение.",
+    )
+
+    context.user_data["unsupported_warning_msg_id"] = warning_msg.message_id
+
 async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles incoming audio files, transcribes them, and starts the conversation.
-    The audio is saved asynchronously in a user-specific folder and later removed if processed successfully.
+    """Process initial interview audio to establish conversation context
+    
+    This function:
+    1. Downloads the audio to a temporary file
+    2. Passes it to the conversation preparation module
+    3. Processes any queued initial query if present
     """
     file_path = None
-    processed_successfully = False  # flag to decide on file removal
+    processed_successfully = False
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     
     logger.info(f"Audio received from User ID: {user_id}, Username: {username}")
 
-    try:
-        audio = update.message.audio
-        audio_file: File = await audio.get_file()
-        
-        logger.debug(f"Audio details - File ID: {audio.file_id}, MIME Type: {audio.mime_type}, File Size: {audio.file_size} bytes")
+    if update.message.audio:
+        media = update.message.audio
+    elif update.message.voice:
+        media = update.message.voice
+    else:
+        return
 
+    try:
+        audio_file: File = await media.get_file()
+        
+        logger.debug(f"Audio details - File ID: {media.file_id}, MIME Type: {media.mime_type}, File Size: {media.file_size} bytes")
+
+        # Ensure user-specific download directory exists
         downloads_dir = os.path.join("downloads", str(user_id))
         os.makedirs(downloads_dir, exist_ok=True)
-        logger.debug(f"Created downloads directory: {downloads_dir}")
-
-        mime_type = audio.mime_type
-        if mime_type == "audio/mpeg":
-            extension = ".mp3"
-        elif mime_type == "audio/ogg":
-            extension = ".ogg"
-        elif mime_type == "audio/mp4":
-            extension = ".m4a"
-        elif mime_type == "audio/x-m4a":
-            extension = ".m4a"
-        elif mime_type == "audio/wav":
-            extension = ".wav"
-        else:
-            extension = None
+        
+        # Determine file extension from MIME type
+        mime_type = media.mime_type
+        extension_map = {
+            "audio/mpeg": ".mp3",
+            "audio/ogg": ".ogg",
+            "audio/mp4": ".m4a",
+            "audio/x-m4a": ".m4a",
+            "audio/wav": ".wav",
+        }
+        extension = extension_map.get(mime_type)
+        
+        if not extension:
             logger.warning(f"Unsupported audio format: {mime_type} from User ID: {user_id}")
-
-        if extension:
-            with tempfile.NamedTemporaryFile(suffix=extension, delete=False, dir=downloads_dir) as temp_file:
-                file_path = temp_file.name
-            logger.info(f"Downloading audio to temporary file: {file_path}")
-            
-            download_task = asyncio.create_task(audio_file.download_to_drive(file_path))
-            await download_task
-            logger.info(f"Audio download completed: {file_path}")
-        else:
             await context.bot.send_message(
                 chat_id=update.effective_chat.id,
                 text="Неподдерживаемый формат аудио.",
             )
             return
 
+        # Create and use temporary file
+        with tempfile.NamedTemporaryFile(suffix=extension, delete=False, dir=downloads_dir) as temp_file:
+            file_path = temp_file.name
+        
+        logger.info(f"Downloading audio to: {file_path}")
+        download_task = asyncio.create_task(audio_file.download_to_drive(file_path))
+        await download_task
+
+        # Remove any previous warnings if needed
+        if context.user_data.get("unsupported_warning_msg_id"):
+            try:
+                await context.bot.delete_message(
+                    chat_id=update.effective_chat.id,
+                    message_id=context.user_data["unsupported_warning_msg_id"],
+                )
+                logger.info("Deleted unsupported file warning message")
+            except Exception as ex:
+                logger.error(f"Could not delete unsupported warning message: {str(ex)}")
+
+            context.user_data.pop("unsupported_warning_msg_id", None)
+
+        # Process the audio
         status_message = await context.bot.send_message(
             chat_id=update.effective_chat.id, text="Аудио получено. Обрабатываю..."
         )
@@ -179,17 +237,21 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
         await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=status_message.message_id)
 
-        # Check if there is any initial query: either from an audio caption or a text sent earlier
+        # Handle any pending query
         pending_query = update.message.caption if update.message.caption else context.user_data.get("initial_query")
         if pending_query:
-            # If a warning message was sent earlier when text arrived, delete it.
+            # Clean up previous warning messages if needed
             if context.user_data.get("warning_msg_id"):
                 try:
-                    await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=context.user_data["warning_msg_id"])
+                    await context.bot.delete_message(
+                        chat_id=update.effective_chat.id, 
+                        message_id=context.user_data["warning_msg_id"]
+                    )
                 except Exception as ex:
                     logger.error(f"Could not delete warning message: {str(ex)}")
                 context.user_data.pop("warning_msg_id", None)
-            context.user_data["initial_query"] = pending_query  # ensure it is stored
+                
+            context.user_data["initial_query"] = pending_query
 
             logger.info(f"Processing initial query for User ID: {user_id}: {pending_query[:50]}...")
             query_status = await context.bot.send_message(
@@ -220,8 +282,8 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             processed_successfully = True
 
+        # Enable chat mode
         context.user_data["chatting"] = True
-        # Clean up the stored initial query
         context.user_data.pop("initial_query", None)
 
     except Exception as e:
@@ -231,6 +293,7 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text="Произошла ошибка при обработке аудио.",
         )
     finally:
+        # Clean up temporary file
         if processed_successfully and file_path and os.path.exists(file_path):
             try:
                 os.remove(file_path)
@@ -238,14 +301,14 @@ async def handle_audio(update: Update, context: ContextTypes.DEFAULT_TYPE):
             except Exception as remove_error:
                 logger.error(f"Failed to remove temporary file {file_path}: {str(remove_error)}", exc_info=True)
 
-
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles text messages (user queries) if the bot is in chat mode."""
+    """Process text queries in chat mode or queue them for later processing"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
     user_query = update.message.text
     
     if context.user_data.get("chatting"):
+        # Chat mode - process query immediately
         logger.info(f"Processing text query from User ID: {user_id}, Username: {username}: {user_query[:50]}...")
     
         processing_msg = await context.bot.send_message(
@@ -269,9 +332,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text="Произошла ошибка при обработке вашего запроса.",
             )
     else:
+        # Queue query for later processing after audio is received
         logger.warning(f"User ID: {user_id} attempted to send a query before audio was received")
-        # Save the text query to be processed later when audio is received.
+        
         if "initial_query" not in context.user_data:
+            # First query before audio
             context.user_data["initial_query"] = user_query
             warning_msg = await context.bot.send_message(
                 chat_id=update.effective_chat.id,
@@ -279,7 +344,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             context.user_data["warning_msg_id"] = warning_msg.message_id
         else:
-            # Append subsequent texts (if needed)
+            # Additional queries before audio
             context.user_data["initial_query"] += "\n" + user_query
             if "warning_msg_id" in context.user_data:
                 try:
@@ -291,38 +356,103 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 except Exception as e:
                     logger.error(f"Failed to edit warning message: {str(e)}", exc_info=True)
 
+async def handle_voice_query(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Process voice messages as queries in chat mode
+    
+    This function:
+    1. Downloads the voice message
+    2. Transcribes it using the voice transcription service
+    3. Processes the transcribed text as a chat query
+    """
+    user_id = update.effective_user.id
+    username = update.effective_user.username or "Unknown"
+    logger.info(f"Voice query received from User ID: {user_id}, Username: {username}")
 
+    # Get the voice or audio media object
+    media = update.message.voice if update.message.voice else (update.message.audio if update.message.audio else None)
+    if not media:
+        return
+
+    # Set up temporary file
+    extension = ".ogg"  # Default for Telegram voice messages
+    downloads_dir = os.path.join("downloads", str(user_id))
+    os.makedirs(downloads_dir, exist_ok=True)
+
+    with tempfile.NamedTemporaryFile(suffix=extension, delete=False, dir=downloads_dir) as temp_file:
+        file_path = temp_file.name
+
+    try:
+        # Download and transcribe the voice message
+        audio_file: File = await media.get_file()
+        logger.info(f"Downloading voice query to: {file_path}")
+        await audio_file.download_to_drive(file_path)
+
+        logger.info(f"Transcribing voice query")
+        transcribed_text = await transcribe_voice(file_path)
+        logger.info(f"Transcription result: {transcribed_text}")
+
+        # Process the transcribed text
+        processing_msg = await context.bot.send_message(
+            chat_id=update.effective_chat.id, text="Обрабатываю ваш запрос..."
+        )
+        try:
+            response = await chat(transcribed_text)
+            if response:
+                await context.bot.delete_message(chat_id=update.effective_chat.id, message_id=processing_msg.message_id)
+                await context.bot.send_message(
+                    chat_id=update.effective_chat.id,
+                    text=response,
+                    parse_mode="HTML",
+                )
+        except Exception as e:
+            logger.error(f"Error during chat for UserID: {user_id}: {str(e)}", exc_info=True)
+            await context.bot.send_message(
+                chat_id=update.effective_chat.id,
+                text="Произошла ошибка при обработке вашего запроса.",
+            )
+    except Exception as e:
+        logger.error(f"Error processing voice query for UserID: {user_id}: {str(e)}", exc_info=True)
+        await context.bot.send_message(
+            chat_id=update.effective_chat.id,
+            text="Произошла ошибка при обработке голосового запроса.",
+        )
+    finally:
+        # Clean up temporary file
+        if os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+                logger.debug(f"Removed temporary file: {file_path}")
+            except Exception as remove_error:
+                logger.error(f"Failed to remove temporary file {file_path}: {str(remove_error)}", exc_info=True)
 
 def main():
+    """Entry point: configure and start the Telegram bot"""
     logger.info("Starting Telegram bot application")
     try:
         application = ApplicationBuilder().token(TOKEN).build()
 
-        # Register command handlers
-        start_handler = CommandHandler("start", start)
-        new_handler = CommandHandler("new", new)
-        help_handler = CommandHandler("help", help_command)
+        # Register handlers in priority order
+        handlers = [
+            CommandHandler("start", start),
+            CommandHandler("new", new),
+            CommandHandler("help", help_command),
+            MessageHandler(filters.AUDIO | filters.VOICE, combined_audio_handler),
+            MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
+            MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_unsupported_file),
+            MessageHandler(filters.COMMAND, unknown_command)  # Must be last
+        ]
         
-        # Register message handlers
-        audio_handler = MessageHandler(filters.AUDIO, handle_audio)
-        text_handler = MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text)
-        
-        # Handler for unknown commands - must be added last
-        unknown_handler = MessageHandler(filters.COMMAND, unknown_command)
+        for handler in handlers:
+            application.add_handler(handler)
 
-        application.add_handler(start_handler)
-        application.add_handler(new_handler)
-        application.add_handler(help_handler)
-        application.add_handler(audio_handler)
-        application.add_handler(text_handler)
-        application.add_handler(unknown_handler)  # Must be added last
+        # Register global error handler
+        application.add_error_handler(error_handler)
 
-        logger.info("Handlers registered, starting polling...")
+        logger.info("All handlers registered, starting polling...")
         application.run_polling()
     except Exception as e:
         logger.critical(f"Failed to start the bot: {str(e)}", exc_info=True)
         sys.exit(1)
-
 
 if __name__ == "__main__":
     main()

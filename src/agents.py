@@ -149,3 +149,44 @@ async def transcribe_audio(audio_file_path: str):
     # print(f"Time taken: {end-start} seconds")
     
     return transcription.text
+
+async def transcribe_voice(audio_file):
+
+    """
+    Transcribes the audio from the given file path using OpenAI's transcription API.
+
+    Args:
+        audio_file (str): The path to the audio file.
+
+    Returns:
+        str: The transcribed text from the audio file.
+    """
+    # Read the file asynchronously into memory
+    async with aiofiles.open(audio_file, "rb") as afile:
+        file_bytes = await afile.read()
+
+    file_stream = io.BytesIO(file_bytes)
+    file_stream.name = audio_file
+
+    with open(audio_file, "rb") as audio_file:
+        # start = time.time()
+        transcription = await client.audio.transcriptions.create(
+            model="gpt-4o-mini-transcribe", # gpt-4o-mini-transcribe, gpt-4o-transcribe
+            file=audio_file,
+            prompt= (
+                        "Transcribe as it is clearly. Incoming audio files are in Russian, Uzbek, and English languages."
+                    ),
+    stream=False # set to True to stream
+    )
+    # end = time.time()
+    # full_text = ""
+    # async for event in transcription:
+    #     if hasattr(event, "delta"):
+    #         print(event.delta, end="", flush=True)
+    #         full_text += event.delta
+
+    # print("\n")
+    # print("-" * 25)
+    # print(f"Time taken: {end-start} seconds")
+    
+    return transcription.text
