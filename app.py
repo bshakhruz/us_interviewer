@@ -71,7 +71,7 @@ async def new(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text="Новый чат начат. Пожалуйста, отправьте новое аудио интервью."
     )
 
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def help(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Display available commands and usage instructions"""
     user_id = update.effective_user.id
     username = update.effective_user.username or "Unknown"
@@ -435,7 +435,7 @@ def main():
         handlers = [
             CommandHandler("start", start),
             CommandHandler("new", new),
-            CommandHandler("help", help_command),
+            CommandHandler("help", help),
             MessageHandler(filters.AUDIO | filters.VOICE, combined_audio_handler),
             MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text),
             MessageHandler(filters.PHOTO | filters.VIDEO | filters.Document.ALL, handle_unsupported_file),
