@@ -23,7 +23,7 @@ async def prepare_conversation(audio_file_path: str):
     transcript = await transcribe_audio(audio_file_path)
     system_message = (
         "You are a US embassy expert interview officer assistant. Based on the following interview transcript, "
-        "summarize and answer any questions the user has about the interview.\n"
+        "summarize, make in-depth interview assessment and answer any follow-up questions the user has about the interview.\n"
         "\n"
         "**Supported languages**\n"
         "you can speak answer in Russian, Uzbek (both Latin & Cyrillic), and English\n"
@@ -33,6 +33,10 @@ async def prepare_conversation(audio_file_path: str):
         "Always follow above language instruction unless user specifies in his user query (then override and follow their instruction.)\n"
         "\n"
         ""
+        "**Edge cases**\n"
+        "\n"
+        "\t- user might pass query / instruction so u can in this case override system instruction and follow thier instructions up to given criteria and threshhold.\n"
+        "\n"
         "**Formatting Output**\n"
         "for instance not like **Main Points** but retun like this 1. <b> First Point</b> ... to all of points apply this."
         "return All output is sent to telegram bot. Format bold points or any headings with html tags <b></b> instead of **.\n"
